@@ -92,6 +92,13 @@
  
   .card-top{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:8px;}
   .card-name{font-size:15px;font-weight:700;line-height:1.3;}
+  .card-name-input{
+    font-size:15px;font-weight:700;line-height:1.3;color:var(--text);
+    background:transparent;border:1px solid transparent;border-radius:6px;
+    padding:2px 4px;margin:-2px -4px;font-family:inherit;width:100%;flex:1;min-width:0;
+  }
+  .card-name-input:hover{border-color:var(--line);}
+  .card-name-input:focus{outline:none;border-color:var(--mint);background:var(--surface-2);}
   .badge{
     font-family:monospace;font-size:10px;font-weight:700;padding:3px 7px;border-radius:6px;white-space:nowrap;
   }
@@ -515,7 +522,7 @@ function renderList(){
     const tcgUrl = 'https://www.tcgplayer.com/search/all/product?q=' + encodeURIComponent(p.name);
     return `<div class="card ${p.category}" id="prodcard-${p.id}">
       <div class="card-top">
-        <div class="card-name">${escapeHtml(p.name)}</div>
+        <input type="text" class="card-name-input" data-name-input data-id="${p.id}" value="${escapeHtml(p.name)}">
         <span class="badge ${p.category}">${CATS[p.category].icon} ${CATS[p.category].label}</span>
       </div>
       <div class="card-row"><span>Cantidad</span>
@@ -562,6 +569,18 @@ document.getElementById('listContainer').addEventListener('change', (e)=>{
     const val = parseFloat(e.target.value)||0;
     p.sellPrice = val;
     logMovement(p, 'Modificación', `Precio de venta actualizado a $${val}`);
+  }
+  if(e.target.matches('[data-name-input]')){
+    const val = e.target.value.trim();
+    if(!val){
+      e.target.value = p.name; // no permitir nombre vacío
+      return;
+    }
+    if(val !== p.name){
+      const oldName = p.name;
+      p.name = val;
+      logMovement(p, 'Modificación', `Nombre actualizado de "${oldName}" a "${val}"`);
+    }
   }
   if(e.target.matches('[data-usd-input]')){
     p.usd = parseFloat(e.target.value)||0;
@@ -627,6 +646,14 @@ document.getElementById('btnPrintQr').addEventListener('click', ()=>{
 
 // MOTOR DE CÁMARA Y ESCANEO QR
 let scanStream=null, scanLoopId=null, scanPaused=false;
+let nativeDetector=null;
+// BarcodeDetector = el mismo lector nativo del sistema (tipo Google Lens) que usan
+// las apps para emparejar TVs, WhatsApp Web, etc. Es mucho más robusto que leer
+// la imagen a mano con jsQR, así que lo usamos cuando el navegador lo soporta.
+if('BarcodeDetector' in window){
+  try{ nativeDetector = new BarcodeDetector({ formats: ['qr_code'] }); }catch(e){ nativeDetector = null; }
+}
+
 document.getElementById('btnStartScan').addEventListener('click', startScan);
 document.getElementById('btnStopScan').addEventListener('click', stopScan);
 
@@ -662,6 +689,9 @@ async function startScan(){
   await v.play();
   document.getElementById('scanStartWrap').style.display='none';
   document.getElementById('scanVideoWrap').style.display='block';
+  document.getElementById('scanStatus').textContent = nativeDetector
+    ? 'Buscando código QR (modo nativo)...'
+    : 'Buscando código QR... enfoca bien';
   scanPaused=false;
   scanLoop();
 }
@@ -677,30 +707,50 @@ function stopScan(){
   document.getElementById('scanVideoWrap').style.display='none';
 }
 
-function scanLoop(){
+function handleScannedText(text){
+  let scannedId = text;
+  if(scannedId.startsWith('INV:')) scannedId = scannedId.slice(4);
+
+  const p = products.find(x => x.id === scannedId);
+  if(p){
+    scanPaused = true;
+    document.getElementById('scanStatus').textContent = '¡Producto encontrado! ✓';
+    stopScan();
+    toast('Producto encontrado: ' + p.name);
+    goToProduct(p);
+  } else {
+    toast('QR leído, pero el producto no existe');
+  }
+}
+
+async function scanLoop(){
   const v = document.getElementById('video');
-  const c = document.getElementById('canvas');
-  if(v.readyState === v.HAVE_ENOUGH_DATA && !scanPaused){
-    c.width = v.videoWidth;
-    c.height = v.videoHeight;
-    const ctx = c.getContext('2d', {willReadFrequently: true});
-    ctx.drawImage(v, 0, 0, c.width, c.height);
-    const imgData = ctx.getImageData(0, 0, c.width, c.height);
-    const code = jsQR(imgData.data, imgData.width, imgData.height);
+  if(scanPaused){ scanLoopId = requestAnimationFrame(scanLoop); return; }
 
-    if(code && code.data){
-      let scannedId = code.data;
-      if(scannedId.startsWith('INV:')) scannedId = scannedId.slice(4);
-
-      const p = products.find(x => x.id === scannedId);
-      if(p){
-        scanPaused = true;
-        document.getElementById('scanStatus').textContent = '¡Producto encontrado! ✓';
-        stopScan();
-        toast('Producto encontrado: ' + p.name);
-        goToProduct(p);
-      } else {
-        toast('QR leído, pero el producto no existe');
+  if(v.readyState === v.HAVE_ENOUGH_DATA){
+    if(nativeDetector){
+      // Camino rápido: lector nativo del sistema, directo sobre el video.
+      try{
+        const barcodes = await nativeDetector.detect(v);
+        if(barcodes && barcodes.length > 0 && barcodes[0].rawValue){
+          handleScannedText(barcodes[0].rawValue);
+          return; // scanPaused ya detuvo el loop dentro de handleScannedText si hubo match
+        }
+      }catch(e){
+        // Si falla el detector nativo en este frame, seguimos con el loop normal
+      }
+    } else {
+      // Respaldo: jsQR sobre un canvas, para navegadores sin BarcodeDetector (ej. iOS Safari)
+      const c = document.getElementById('canvas');
+      c.width = v.videoWidth;
+      c.height = v.videoHeight;
+      const ctx = c.getContext('2d', {willReadFrequently: true});
+      ctx.drawImage(v, 0, 0, c.width, c.height);
+      const imgData = ctx.getImageData(0, 0, c.width, c.height);
+      const code = jsQR(imgData.data, imgData.width, imgData.height);
+      if(code && code.data){
+        handleScannedText(code.data);
+        return;
       }
     }
   }
