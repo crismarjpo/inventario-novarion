@@ -13,6 +13,8 @@
 <!-- QR Code Libraries -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.js"></script>
+<!-- Excel (.xlsx) Library -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   :root{
     --bg:#12141c;
@@ -208,7 +210,7 @@
     <h1>Inventario Novarion <span class="stamp">PRO</span></h1>
     <div class="header-actions">
       <span class="count" id="headerCount" style="font-size:13px;font-family:monospace;color:var(--muted);">0 prod.</span>
-      <button class="btn ghost small" id="btnExport">Exportar Excel (CSV)</button>
+      <button class="btn ghost small" id="btnExport">Exportar Excel (.xlsx)</button>
     </div>
   </header>
  
@@ -472,25 +474,57 @@ document.getElementById('btnCreate').addEventListener('click', ()=>{
 });
  
 document.getElementById('btnExport').addEventListener('click', ()=>{
-  let csv = "\uFEFF=== INVENTARIO GENERAL ===\n";
-  csv += "ID,Nombre,Categoría,Cantidad,USD,Tasa,Costo Base,Venta,Estado\n";
-  products.forEach(p => { 
-    csv += `"${p.id}","${p.name}","${CATS[p.category].label}",${p.qty},${p.usd||0},${p.dolar||settings.dolar},${p.cost},${p.sellPrice},"${p.status}"\n`; 
-  });
-  
-  csv += "\n\uFEFF=== HISTORIAL DE MOVIMIENTOS ===\n";
-  csv += "ID Producto,Nombre Producto,Fecha y Hora,Tipo de Movimiento,USD,Tasa,Costo Base,Venta,Detalle\n";
-  products.forEach(p => {
-    if(p.movements && p.movements.length > 0){
-      p.movements.forEach(m => {
-        csv += `"${p.id}","${p.name}","${m.fecha}","${m.tipo}",${m.usd},${m.dolar},${m.cost},${m.sellPrice},"${m.detalle}"\n`;
-      });
-    }
-  });
+  const wb = XLSX.utils.book_new();
 
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const link = document.createElement('a'); link.href = URL.createObjectURL(blob);
-  link.download = "inventario_con_movimientos.csv"; link.click();
+  // Hojas por categoría: movimientos agrupados por producto (creación -> modificaciones -> salida),
+  // sin mezclar el historial de un producto con el de otro.
+  function buildCategorySheet(cat){
+    const rows = [['ID Producto','Nombre','Fecha y Hora','Tipo de Movimiento','USD','Tasa','Costo Base','Venta','Detalle']];
+    products.filter(p => p.category === cat).forEach(p => {
+      rows.push([`— ${p.name} —`]);
+      if(p.movements && p.movements.length > 0){
+        p.movements.forEach(m => {
+          rows.push([p.id, p.name, m.fecha, m.tipo, m.usd, m.dolar, m.cost, m.sellPrice, m.detalle]);
+        });
+      } else {
+        rows.push(['(sin movimientos registrados)']);
+      }
+      rows.push([]); // fila en blanco entre productos
+    });
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{wch:14},{wch:26},{wch:20},{wch:22},{wch:10},{wch:10},{wch:12},{wch:12},{wch:40}];
+    return ws;
+  }
+
+  XLSX.utils.book_append_sheet(wb, buildCategorySheet('novarion'), 'Novarion');
+  XLSX.utils.book_append_sheet(wb, buildCategorySheet('pokemon'), 'Pokemon');
+
+  // Hojas por estado: productos con su categoría y última modificación
+  function buildStatusSheet(status){
+    const rows = [['Categoría','Nombre','Cantidad','Precio USD','Costo Base','Precio Venta','Última Modificación','Último Movimiento']];
+    products.filter(p => p.status === status).forEach(p => {
+      const lm = (p.movements && p.movements.length) ? p.movements[p.movements.length - 1] : null;
+      rows.push([
+        CATS[p.category].label,
+        p.name,
+        p.qty,
+        p.usd || 0,
+        p.cost,
+        p.sellPrice,
+        lm ? lm.fecha : '',
+        lm ? `${lm.tipo}: ${lm.detalle}` : ''
+      ]);
+    });
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{wch:14},{wch:26},{wch:10},{wch:12},{wch:12},{wch:12},{wch:20},{wch:40}];
+    return ws;
+  }
+
+  XLSX.utils.book_append_sheet(wb, buildStatusSheet('Disponible'), 'Disponibles');
+  XLSX.utils.book_append_sheet(wb, buildStatusSheet('Reservado'), 'Reservados');
+  XLSX.utils.book_append_sheet(wb, buildStatusSheet('Vendido'), 'Vendidos');
+
+  XLSX.writeFile(wb, 'inventario_novarion.xlsx');
 });
  
 let currentCatFilter = 'novarion';
